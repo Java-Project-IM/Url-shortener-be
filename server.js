@@ -37,8 +37,8 @@ const connectDB = async () => {
       process.env.MONGODB_URI || "mongodb://localhost:27017/url-shortener";
 
     await mongoose.connect(mongoURI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
+      // `useNewUrlParser` and `useUnifiedTopology` are default in Mongoose v6+
+      // and passing them is deprecated. Keep other valid options.
       serverSelectionTimeoutMS: 5000,
     });
 
