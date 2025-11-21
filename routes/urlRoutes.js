@@ -4,6 +4,12 @@ const { nanoid } = require("nanoid");
 const Url = require("../models/Url");
 const { urlCache } = require("../utils/hashMap");
 const { rateLimiter } = require("../utils/rateLimiter");
+const { logger } = require("../utils/logger");
+const {
+  validateShortenRequest,
+  validateShortCode,
+} = require("../middleware/validation");
+const { asyncHandler } = require("../middleware/errorHandler");
 
 /**
  * Rate Limiting Middleware using Queue-based implementation
@@ -13,6 +19,11 @@ const rateLimitMiddleware = (req, res, next) => {
   const result = rateLimiter.isAllowed(identifier);
 
   if (!result.allowed) {
+    logger.warn("Rate limit exceeded", {
+      ip: identifier,
+      retryAfter: result.retryAfter,
+    });
+
     return res.status(429).json({
       success: false,
       error: "Too many requests",
@@ -23,44 +34,34 @@ const rateLimitMiddleware = (req, res, next) => {
 
   // Add rate limit info to response headers
   res.setHeader("X-RateLimit-Remaining", result.remaining);
+  res.setHeader("X-RateLimit-Limit", rateLimiter.maxRequests);
   next();
 };
 
 /**
  * POST /api/shorten
  * Create a shortened URL
- *
- * Demonstrates:
- * - Hash Map: O(1) insertion of short code -> URL mapping
- * - Queue: Rate limiting to prevent abuse
  */
-router.post("/shorten", rateLimitMiddleware, async (req, res) => {
-  try {
+router.post(
+  "/api/shorten",
+  rateLimitMiddleware,
+  validateShortenRequest,
+  asyncHandler(async (req, res) => {
     const { originalUrl } = req.body;
 
-    // Validate URL
-    if (!originalUrl) {
-      return res.status(400).json({
-        success: false,
-        error: "Original URL is required",
-      });
-    }
-
-    // Basic URL validation
-    try {
-      new URL(originalUrl);
-    } catch (err) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid URL format",
-      });
-    }
+    logger.info("Shortening URL requested", {
+      url: originalUrl.substring(0, 100),
+      ip: req.ip,
+    });
 
     // Check if URL already exists in database
     let url = await Url.findOne({ originalUrl });
 
     if (url) {
-      // URL already shortened, return existing short code
+      logger.info("URL already exists, returning existing short code", {
+        shortCode: url.shortCode,
+      });
+
       // Update cache using HashMap - O(1) operation
       urlCache.set(url.shortCode, url.originalUrl);
 
@@ -77,7 +78,26 @@ router.post("/shorten", rateLimitMiddleware, async (req, res) => {
     }
 
     // Generate unique short code
-    const shortCode = nanoid(7);
+    let shortCode;
+    let attempts = 0;
+    const maxAttempts = 5;
+
+    do {
+      shortCode = nanoid(7);
+      const existing = await Url.findOne({ shortCode });
+      if (!existing) break;
+      attempts++;
+    } while (attempts < maxAttempts);
+
+    if (attempts >= maxAttempts) {
+      logger.error("Failed to generate unique short code", {
+        attempts,
+      });
+      return res.status(500).json({
+        success: false,
+        error: "Failed to generate unique short code. Please try again.",
+      });
+    }
 
     // Create new URL document
     url = new Url({
@@ -88,8 +108,13 @@ router.post("/shorten", rateLimitMiddleware, async (req, res) => {
 
     await url.save();
 
-    // Store in HashMap cache for O(1) lookup - DSA Demonstration
+    // Store in HashMap cache for O(1) lookup
     urlCache.set(shortCode, originalUrl);
+
+    logger.info("URL shortened successfully", {
+      shortCode,
+      originalUrl: originalUrl.substring(0, 100),
+    });
 
     res.status(201).json({
       success: true,
@@ -101,30 +126,25 @@ router.post("/shorten", rateLimitMiddleware, async (req, res) => {
         createdAt: url.createdAt,
       },
     });
-  } catch (error) {
-    console.error("Error creating short URL:", error);
-    res.status(500).json({
-      success: false,
-      error: "Server error",
-    });
-  }
-});
+  })
+);
 
 /**
  * GET /:shortCode
  * Redirect to original URL
- *
- * Demonstrates:
- * - Hash Map: O(1) lookup of original URL by short code
  */
-router.get("/:shortCode", async (req, res) => {
-  try {
+router.get(
+  "/:shortCode",
+  validateShortCode,
+  asyncHandler(async (req, res) => {
     const { shortCode } = req.params;
 
     // First, try to get from HashMap cache - O(1) operation
     let originalUrl = urlCache.get(shortCode);
 
     if (originalUrl) {
+      logger.debug("Cache hit for short code", { shortCode });
+
       // Found in cache, update click count in background
       Url.findOneAndUpdate(
         { shortCode },
@@ -143,10 +163,13 @@ router.get("/:shortCode", async (req, res) => {
       return res.redirect(originalUrl);
     }
 
+    logger.debug("Cache miss for short code", { shortCode });
+
     // Not in cache, fetch from database
     const url = await Url.findOne({ shortCode });
 
     if (!url) {
+      logger.warn("Short code not found", { shortCode, ip: req.ip });
       return res.status(404).json({
         success: false,
         error: "Short URL not found",
@@ -165,22 +188,22 @@ router.get("/:shortCode", async (req, res) => {
     });
     await url.save();
 
-    res.redirect(url.originalUrl);
-  } catch (error) {
-    console.error("Error redirecting:", error);
-    res.status(500).json({
-      success: false,
-      error: "Server error",
+    logger.info("Redirecting to original URL", {
+      shortCode,
+      clicks: url.clicks,
     });
-  }
-});
+
+    res.redirect(url.originalUrl);
+  })
+);
 
 /**
  * GET /api/urls
  * Get all shortened URLs with analytics
  */
-router.get("/api/urls", async (req, res) => {
-  try {
+router.get(
+  "/api/urls",
+  asyncHandler(async (req, res) => {
     const urls = await Url.find()
       .sort({ createdAt: -1 })
       .select("-clickHistory")
@@ -195,30 +218,32 @@ router.get("/api/urls", async (req, res) => {
       createdAt: url.createdAt,
     }));
 
+    logger.debug("URLs list requested", { count: urls.length });
+
     res.json({
       success: true,
       data: urlsWithShortUrl,
+      count: urls.length,
     });
-  } catch (error) {
-    console.error("Error fetching URLs:", error);
-    res.status(500).json({
-      success: false,
-      error: "Server error",
-    });
-  }
-});
+  })
+);
 
 /**
  * GET /api/analytics/:shortCode
  * Get detailed analytics for a specific short URL
  */
-router.get("/api/analytics/:shortCode", async (req, res) => {
-  try {
+router.get(
+  "/api/analytics/:shortCode",
+  validateShortCode,
+  asyncHandler(async (req, res) => {
     const { shortCode } = req.params;
 
     const url = await Url.findOne({ shortCode });
 
     if (!url) {
+      logger.warn("Analytics requested for non-existent short code", {
+        shortCode,
+      });
       return res.status(404).json({
         success: false,
         error: "Short URL not found",
@@ -226,7 +251,12 @@ router.get("/api/analytics/:shortCode", async (req, res) => {
     }
 
     // Get recent click history (last 50 clicks)
-    const recentClicks = url.clickHistory.slice(-50);
+    const recentClicks = url.clickHistory.slice(-50).reverse();
+
+    logger.debug("Analytics requested", {
+      shortCode,
+      totalClicks: url.clicks,
+    });
 
     res.json({
       success: true,
@@ -242,26 +272,25 @@ router.get("/api/analytics/:shortCode", async (req, res) => {
         })),
       },
     });
-  } catch (error) {
-    console.error("Error fetching analytics:", error);
-    res.status(500).json({
-      success: false,
-      error: "Server error",
-    });
-  }
-});
+  })
+);
 
 /**
  * DELETE /api/urls/:shortCode
  * Delete a shortened URL
  */
-router.delete("/api/urls/:shortCode", async (req, res) => {
-  try {
+router.delete(
+  "/api/urls/:shortCode",
+  validateShortCode,
+  asyncHandler(async (req, res) => {
     const { shortCode } = req.params;
 
     const url = await Url.findOneAndDelete({ shortCode });
 
     if (!url) {
+      logger.warn("Delete requested for non-existent short code", {
+        shortCode,
+      });
       return res.status(404).json({
         success: false,
         error: "Short URL not found",
@@ -271,17 +300,16 @@ router.delete("/api/urls/:shortCode", async (req, res) => {
     // Remove from cache
     urlCache.delete(shortCode);
 
+    logger.info("URL deleted successfully", {
+      shortCode,
+      originalUrl: url.originalUrl.substring(0, 100),
+    });
+
     res.json({
       success: true,
       message: "URL deleted successfully",
     });
-  } catch (error) {
-    console.error("Error deleting URL:", error);
-    res.status(500).json({
-      success: false,
-      error: "Server error",
-    });
-  }
-});
+  })
+);
 
 module.exports = router;
