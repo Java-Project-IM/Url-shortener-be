@@ -16,6 +16,21 @@ const app = express();
 // Trust proxy (for rate limiting and IP detection)
 app.set("trust proxy", 1);
 
+// Lightweight health endpoint (minimal, not rate-limited nor logged)
+// Useful for external pings to avoid cold starts. Placed before
+// request logging and other heavy middleware to minimize overhead.
+app.get("/healthz", (req, res) => {
+  return res.status(200).json({
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    mongodb:
+      mongoose && mongoose.connection && mongoose.connection.readyState === 1
+        ? "connected"
+        : "disconnected",
+  });
+});
+
 // Security middleware
 app.use(securityHeaders);
 app.use(configureCors());
