@@ -31,6 +31,11 @@ app.get("/healthz", (req, res) => {
   });
 });
 
+// Respond to HEAD/GET / used by some platforms/load-balancers for liveness
+// Keep these minimal and placed before request logging to avoid noise.
+app.head("/", (req, res) => res.sendStatus(200));
+app.get("/", (req, res) => res.sendStatus(200));
+
 // Security middleware
 app.use(securityHeaders);
 app.use(configureCors());
@@ -56,7 +61,6 @@ const connectDB = async () => {
       // and passing them is deprecated. Keep other valid options.
       serverSelectionTimeoutMS: 5000,
     });
-
     logger.info("MongoDB connected successfully", {
       database: "url-shortener",
       host: mongoose.connection.host,
