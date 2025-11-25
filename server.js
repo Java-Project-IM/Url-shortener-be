@@ -3,6 +3,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const compression = require("compression");
 const urlRoutes = require("./routes/urlRoutes");
+const healthRoute = require("./routes/healthRoute");
 const { logger } = require("./utils/logger");
 const {
   configureCors,
@@ -19,17 +20,10 @@ app.set("trust proxy", 1);
 // Lightweight health endpoint (minimal, not rate-limited nor logged)
 // Useful for external pings to avoid cold starts. Placed before
 // request logging and other heavy middleware to minimize overhead.
-app.get("/healthz", (req, res) => {
-  return res.status(200).json({
-    status: "OK",
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    mongodb:
-      mongoose && mongoose.connection && mongoose.connection.readyState === 1
-        ? "connected"
-        : "disconnected",
-  });
-});
+// Mount lightweight health endpoints before middleware so they're very fast
+// and not subject to logging, compression, or rate limiting.
+app.use("/healthz", healthRoute);
+app.use("/health", healthRoute);
 
 // Respond to HEAD/GET / used by some platforms/load-balancers for liveness
 // Keep these minimal and placed before request logging to avoid noise.
@@ -88,24 +82,10 @@ connectDB();
 // Routes
 app.use("/", urlRoutes);
 
-// Health check endpoint
-app.get("/health", (req, res) => {
-  const healthData = {
-    status: "OK",
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: process.env.NODE_ENV || "development",
-    mongodb:
-      mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-    memory: {
-      used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + "MB",
-      total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024) + "MB",
-    },
-  };
-
-  logger.debug("Health check requested", healthData);
-  res.json(healthData);
-});
+// NOTE: /health and /healthz are handled by the lightweight route mounted
+// earlier (controller/healthController.js) which purposefully avoids DB checks
+// and heavy processing so that external pings can be executed as frequently
+// as needed without causing additional load or logging.
 
 // 404 handler
 app.use(notFoundHandler);
