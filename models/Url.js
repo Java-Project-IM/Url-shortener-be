@@ -38,7 +38,13 @@ const urlSchema = new mongoose.Schema(
     },
     expiresAt: {
       type: Date,
+      default: null, // null means never expires
+    },
+    category: {
+      type: String,
       default: null,
+      trim: true,
+      lowercase: true,
     },
   },
   {
@@ -49,5 +55,17 @@ const urlSchema = new mongoose.Schema(
 // Index for efficient queries
 urlSchema.index({ createdAt: -1 });
 urlSchema.index({ clicks: -1 });
+urlSchema.index({ expiresAt: 1 });
+urlSchema.index({ category: 1 });
+
+// Virtual field to check if expired
+urlSchema.virtual("isExpired").get(function () {
+  if (!this.expiresAt) return false;
+  return new Date() > this.expiresAt;
+});
+
+// Ensure virtuals are included in JSON
+urlSchema.set("toJSON", { virtuals: true });
+urlSchema.set("toObject", { virtuals: true });
 
 module.exports = mongoose.model("Url", urlSchema);
