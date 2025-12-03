@@ -55,15 +55,20 @@ router.post(
       ip: req.ip,
     });
 
-    // Validate expiration date if provided
+    // Calculate expiration date - default to 6 months, max 6 months
+    const maxExpiry = getMaxExpiryDate();
+    let expDate = maxExpiry; // Default to 6 months
+
     if (expiresAt) {
-      const expDate = new Date(expiresAt);
-      if (isNaN(expDate.getTime()) || expDate <= new Date()) {
+      const providedDate = new Date(expiresAt);
+      if (isNaN(providedDate.getTime()) || providedDate <= new Date()) {
         return res.status(400).json({
           success: false,
           error: "Expiration date must be in the future",
         });
       }
+      // Enforce maximum of 6 months
+      expDate = providedDate > maxExpiry ? maxExpiry : providedDate;
     }
 
     // Check if URL already exists in database (without expiration/category for matching)
@@ -118,7 +123,7 @@ router.post(
       originalUrl,
       shortCode,
       clicks: 0,
-      expiresAt: expiresAt ? new Date(expiresAt) : null,
+      expiresAt: expDate,
       category: category ? category.toLowerCase().trim() : null,
     });
 
@@ -329,6 +334,20 @@ const isValidUrl = (urlString) => {
 };
 
 /**
+ * Maximum expiration time in months
+ */
+const MAX_EXPIRY_MONTHS = 6;
+
+/**
+ * Calculate the maximum expiry date (6 months from now)
+ */
+const getMaxExpiryDate = () => {
+  const date = new Date();
+  date.setMonth(date.getMonth() + MAX_EXPIRY_MONTHS);
+  return date;
+};
+
+/**
  * POST /api/bulk-shorten
  * Create multiple shortened URLs simultaneously
  */
@@ -358,6 +377,7 @@ router.post(
       ip: req.ip,
     });
 
+    const maxExpiry = getMaxExpiryDate();
     const successful = [];
     const failed = [];
 
@@ -374,16 +394,14 @@ router.post(
           continue;
         }
 
-        // Validate expiration if provided
+        // Calculate expiration - default to 6 months, max 6 months
+        let expDate = maxExpiry;
         if (expiresAt) {
-          const expDate = new Date(expiresAt);
-          if (isNaN(expDate.getTime()) || expDate <= new Date()) {
-            failed.push({
-              originalUrl,
-              error: "Invalid expiration date",
-            });
-            continue;
+          const providedDate = new Date(expiresAt);
+          if (!isNaN(providedDate.getTime()) && providedDate > new Date()) {
+            expDate = providedDate > maxExpiry ? maxExpiry : providedDate;
           }
+          // If invalid date provided, just use default (don't fail the item)
         }
 
         // Generate unique short code
@@ -409,7 +427,7 @@ router.post(
         const url = new Url({
           originalUrl,
           shortCode,
-          expiresAt: expiresAt ? new Date(expiresAt) : null,
+          expiresAt: expDate,
           category: category ? category.toLowerCase().trim() : null,
         });
 
